@@ -35,8 +35,10 @@ public class SimpleBackend {
         System.out.println("[SimpleBackend] Available collections: /api/courses, /api/faculty, /api/rooms");
         System.out.println("[SimpleBackend] Timetable endpoints: /api/timetable, /api/timetable/generate, /api/timetable/validate, /api/timetable/suggest");
         System.out.println("[SimpleBackend] AI endpoints: /api/timetable/auto-fix, /api/timetable/chat");
+        System.out.println("[SimpleBackend] Resolve conflicts: /api/timetable/resolve-conflicts");
         System.out.println("[SimpleBackend] Export endpoints: /api/export/csv, /api/export/json");
         System.out.println("[SimpleBackend] Analytics: /api/analytics");
+
     }
 
     private static void handleApi(HttpExchange exchange) throws IOException {
@@ -182,6 +184,23 @@ public class SimpleBackend {
             }
             return;
         }
+
+        if ("/api/timetable/resolve-conflicts".equals(path)) {
+            if (!"POST".equals(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, "{\"error\":\"Method not allowed\"}");
+                return;
+            }
+            String body = readBody(exchange);
+            try {
+                String response = TimetableController.resolveConflicts(body);
+                sendJson(exchange, 200, response);
+            } catch (Exception ex) {
+                ex.printStackTrace();
+                sendJson(exchange, 500, "{\"error\":\"" + escapeJson(ex.getMessage()) + "\"}");
+            }
+            return;
+        }
+
 
         if ("/api/timetable/chat".equals(path)) {
             if (!"POST".equals(exchange.getRequestMethod())) {

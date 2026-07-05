@@ -1,13 +1,25 @@
 import java.util.*;
 
 /**
- * AI-driven timetable generation service using Groq Llama 3.3.
- * Implements a validation-repair loop: generate → validate → repair (up to MAX_RETRIES).
+ * AI-driven timetable generation using Groq Llama 3.3.
+ * Implements a validation-repair loop: generate → validateFull (cross-semester) → repair.
  * Falls back to deterministic local solver if AI fails.
+ *
+ * Key improvements:
+ * - Passes the FULL existing timetable to AI so it avoids cross-semester clashes
+ * - Uses validateFull() which checks room/faculty conflicts across ALL semesters
+ * - Detects faculty overload and generates staffing alerts
+ * - Room capacity is enforced at validation and repair stages
  */
 public class AIService {
     private static final int MAX_RETRIES = 5;
 
+    /**
+     * Generate a timetable for the given dept+semester+section.
+     *
+     * @param existingTimetable  All already-saved entries (other semesters/depts) — used for
+     *                           cross-semester clash detection. Pass empty list if none.
+     */
     @SuppressWarnings("unchecked")
     public static String generate(
             List<Map<String, Object>> courses,
@@ -18,70 +30,82 @@ public class AIService {
             String customCommand,
             List<String> days,
             List<String> slots,
-            String scheduleType
+            String scheduleType,
+            List<Map<String, Object>> existingTimetable   // ← NEW: cross-semester context
     ) throws Exception {
+
         String systemPrompt = PromptBuilder.buildSystemPrompt(scheduleType);
-        String userPrompt   = PromptBuilder.buildUserPrompt(
+
+        // Build user prompt WITH cross-semester context
+        String userPrompt = PromptBuilder.buildUserPromptWithContext(
                 courses, faculty, rooms, dept, semester, section,
-                constraints, customCommand, days, slots);
+                constraints, customCommand, days, slots,
+                existingTimetable);
 
-        Map<String, Object> parsedResponse        = null;
-        List<Map<String, Object>> generatedTimetable = null;
-        ValidationEngine.ValidationResult validation = null;
-
+        Map<String, Object>          parsedResponse     = null;
+        List<Map<String, Object>>    generatedTimetable = null;
+        ValidationEngine.ValidationResult validation    = null;
         String currentUserPrompt = userPrompt;
 
         for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             System.out.println("[AIService] === Attempt " + attempt + "/" + MAX_RETRIES + " ===");
 
+            // ── Call Groq ────────────────────────────────────────────────────
             String aiResponse;
             try {
                 aiResponse = GroqClient.callGroq(systemPrompt, currentUserPrompt);
             } catch (Exception e) {
-                System.err.println("[AIService] Groq API call failed on attempt " + attempt + ": " + e.getMessage());
+                System.err.println("[AIService] Groq call failed (attempt " + attempt + "): " + e.getMessage());
                 if (attempt == MAX_RETRIES) throw e;
                 Thread.sleep(2000L * attempt);
                 continue;
             }
 
-            // Parse the response JSON
+            // ── Parse JSON ───────────────────────────────────────────────────
             try {
                 parsedResponse = ResponseParser.parseResponse(aiResponse);
             } catch (Exception e) {
-                System.err.println("[AIService] JSON parse failed on attempt " + attempt + ": " + e.getMessage());
-                // Prompt AI to fix its JSON
-                currentUserPrompt = "Your previous response was not valid JSON. Parse error: " + e.getMessage() + "\n\n" +
-                        "Please output ONLY a valid JSON object matching this schema:\n" +
-                        "{\"timetable\": [{\"day\":\"Monday\",\"slot\":\"8:00-9:00\",\"course\":\"CS301\",\"faculty\":\"F01\",\"room\":\"R101\",\"section\":\"A\",\"semester\":5,\"dept\":\"CSE\",\"color\":\"#1a4a8a\"}]}\n\n" +
-                        "Original task:\n" + userPrompt;
+                System.err.println("[AIService] JSON parse failed (attempt " + attempt + "): " + e.getMessage());
+                currentUserPrompt =
+                    "Your previous response was NOT valid JSON. Error: " + e.getMessage() + "\n\n" +
+                    "Output ONLY a valid JSON object with this structure:\n" +
+                    "{\"timetable\":[{\"day\":\"Monday\",\"slot\":\"9:00-10:00\",\"course\":\"CS301\"," +
+                    "\"faculty\":\"F01\",\"room\":\"R101\",\"section\":\"A\",\"semester\":5," +
+                    "\"dept\":\"CSE\",\"color\":\"#1a4a8a\"}]}\n\n" +
+                    "Original task:\n" + userPrompt;
                 Thread.sleep(1500L);
                 continue;
             }
 
-            // Extract timetable array
+            // ── Extract timetable array ───────────────────────────────────────
             generatedTimetable = extractTimetableArray(parsedResponse);
             if (generatedTimetable == null || generatedTimetable.isEmpty()) {
-                System.err.println("[AIService] Attempt " + attempt + ": No timetable array found in response. Keys: " + parsedResponse.keySet());
-                currentUserPrompt = "Your previous response was missing the 'timetable' array or it was empty.\n\n" +
-                        "REQUIRED: Your response MUST have a 'timetable' key with an array of schedule entries.\n" +
-                        "Original task:\n" + userPrompt;
+                System.err.println("[AIService] Attempt " + attempt + ": missing/empty 'timetable' key. " +
+                        "Response keys: " + parsedResponse.keySet());
+                currentUserPrompt =
+                    "Your response is missing the required 'timetable' array (or it is empty).\n" +
+                    "REQUIRED: the JSON root object MUST contain a 'timetable' key with a non-empty array.\n\n" +
+                    "Original task:\n" + userPrompt;
                 Thread.sleep(1500L);
                 continue;
             }
 
-            // Normalize data types (semester must be int, etc.)
+            // ── Normalize data types ──────────────────────────────────────────
             generatedTimetable = normalizeTimetableEntries(generatedTimetable, dept, semester);
 
-            // Validate the generated timetable
-            validation = ValidationEngine.validate(generatedTimetable, courses, faculty, rooms);
+            // ── Validate cross-semester ───────────────────────────────────────
+            validation = ValidationEngine.validateFull(
+                    generatedTimetable,
+                    existingTimetable,   // ← pass all other semester entries
+                    courses, faculty, rooms);
 
-            System.out.println("[AIService] Attempt " + attempt + " result: " +
-                    generatedTimetable.size() + " entries | " +
-                    validation.hardCount + " hard violations | " +
-                    validation.softCount + " soft violations | " +
-                    "Score: " + validation.overallScore + "%");
+            System.out.printf("[AIService] Attempt %d: %d entries | %d hard | %d soft | score=%d%%%n",
+                    attempt, generatedTimetable.size(),
+                    validation.hardCount, validation.softCount, validation.overallScore);
 
-            // Success conditions: 0 hard + 0 soft in first 3 attempts, 0 hard only after
+            // ── Success? ──────────────────────────────────────────────────────
+            // First 3 attempts: require 0 hard + 0 soft violations
+            // Attempts 4-5: accept 0 hard only (soft is OK)
             boolean success = attempt <= 3
                     ? (validation.hardCount == 0 && validation.softCount == 0)
                     : (validation.hardCount == 0);
@@ -91,47 +115,52 @@ public class AIService {
                 break;
             }
 
-            // Build repair prompt for next attempt
+            // ── Build repair prompt ───────────────────────────────────────────
             if (attempt < MAX_RETRIES) {
                 currentUserPrompt = PromptBuilder.buildRepairPrompt(
                         userPrompt,
                         JsonUtil.toJson(generatedTimetable),
                         validation.conflicts,
-                        validation.softViolations
-                );
-                Thread.sleep(2500L); // Rate limit buffer
+                        validation.softViolations);
+                System.out.println("[AIService] Sending repair prompt with " +
+                        validation.hardCount + " hard violations to fix...");
+                Thread.sleep(2500L);
             }
         }
 
         if (generatedTimetable == null) {
-            throw new RuntimeException("AI failed to generate a timetable after " + MAX_RETRIES + " attempts.");
+            throw new RuntimeException(
+                    "AI failed to generate a valid timetable after " + MAX_RETRIES + " attempts.");
         }
         if (validation == null) {
-            validation = ValidationEngine.validate(generatedTimetable, courses, faculty, rooms);
+            validation = ValidationEngine.validateFull(
+                    generatedTimetable, existingTimetable, courses, faculty, rooms);
         }
 
-        // Overwrite AI-reported scores with our validated scores (prevents hallucinated scores)
-        parsedResponse.put("timetable", generatedTimetable);
-        parsedResponse.put("conflicts", validation.conflicts);
-        parsedResponse.put("softConstraintViolations", validation.softViolations);
-        parsedResponse.put("facultyWorkload", TimetableController.calculateFacultyWorkload(generatedTimetable, faculty));
-        parsedResponse.put("roomUtilization", TimetableController.calculateRoomUtilization(generatedTimetable, rooms));
+        // ── Build final response ──────────────────────────────────────────────
+        // Overwrite AI self-reported scores with our validated scores
+        parsedResponse.put("timetable",               generatedTimetable);
+        parsedResponse.put("conflicts",               validation.conflicts);
+        parsedResponse.put("softConstraintViolations",validation.softViolations);
+        parsedResponse.put("staffingAlerts",          validation.staffingAlerts);
+        parsedResponse.put("facultyWorkload",
+                TimetableController.calculateFacultyWorkload(generatedTimetable, faculty));
+        parsedResponse.put("roomUtilization",
+                TimetableController.calculateRoomUtilization(generatedTimetable, rooms));
 
         Map<String, Object> scoreMap = new LinkedHashMap<>();
         scoreMap.put("hardViolations", validation.hardCount);
         scoreMap.put("softViolations", validation.softCount);
-        scoreMap.put("overallScore", validation.overallScore);
-        parsedResponse.put("score", scoreMap);
+        scoreMap.put("overallScore",   validation.overallScore);
+        parsedResponse.put("score",      scoreMap);
         parsedResponse.put("generator", "AI (Groq Llama 3.3-70B Versatile)");
-        parsedResponse.put("entries", generatedTimetable.size());
+        parsedResponse.put("entries",    generatedTimetable.size());
 
         return JsonUtil.toJson(parsedResponse);
     }
 
-    /**
-     * Safely extract the timetable array from parsed response.
-     * Handles various key names the AI might use.
-     */
+    // ── Helpers ─────────────────────────────────────────────────────────────────
+
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> extractTimetableArray(Map<String, Object> parsed) {
         for (String key : new String[]{"timetable", "schedule", "entries", "result", "data"}) {
@@ -139,13 +168,11 @@ public class AIService {
             if (val instanceof List<?> list && !list.isEmpty()) {
                 List<Map<String, Object>> result = new ArrayList<>();
                 for (Object item : list) {
-                    if (item instanceof Map) {
-                        result.add((Map<String, Object>) item);
-                    }
+                    if (item instanceof Map) result.add((Map<String, Object>) item);
                 }
                 if (!result.isEmpty()) {
                     if (!"timetable".equals(key)) {
-                        System.out.println("[AIService] Note: timetable was found under key '" + key + "', normalized.");
+                        System.out.println("[AIService] Note: timetable found under key '" + key + "', normalised.");
                     }
                     return result;
                 }
@@ -155,41 +182,42 @@ public class AIService {
     }
 
     /**
-     * Normalize timetable entry data types for consistency.
-     * - semester → int
-     * - section → String
-     * - dept → use provided dept if missing
+     * Normalize entry data types:
+     *  - semester → int
+     *  - section  → String
+     *  - dept     → fallback to provided dept
+     *  - color    → default if missing
      */
     private static List<Map<String, Object>> normalizeTimetableEntries(
             List<Map<String, Object>> entries, String dept, String semester) {
         List<Map<String, Object>> normalized = new ArrayList<>();
-        int semInt = Integer.parseInt(semester);
+        int semInt = 0;
+        try { semInt = Integer.parseInt(semester); } catch (NumberFormatException ignored) {}
 
         for (Map<String, Object> entry : entries) {
             Map<String, Object> e = new LinkedHashMap<>(entry);
 
-            // Semester must be int
+            // semester → int
             Object sem = e.get("semester");
             if (sem instanceof String s) {
-                try { e.put("semester", Integer.parseInt(s.trim())); } catch (NumberFormatException ex) { e.put("semester", semInt); }
+                try { e.put("semester", Integer.parseInt(s.trim())); }
+                catch (NumberFormatException ex) { e.put("semester", semInt); }
             } else if (sem instanceof Number n) {
                 e.put("semester", n.intValue());
             } else {
                 e.put("semester", semInt);
             }
 
-            // Dept fallback
+            // dept fallback
             if (e.get("dept") == null || e.get("dept").toString().isBlank()) {
                 e.put("dept", dept);
             }
 
-            // Section must be a String
+            // section → String
             Object sec = e.get("section");
-            if (sec != null) {
-                e.put("section", sec.toString());
-            }
+            if (sec != null) e.put("section", sec.toString());
 
-            // Ensure color is set
+            // color default
             if (e.get("color") == null || e.get("color").toString().isBlank()) {
                 e.put("color", "#1a4a8a");
             }

@@ -99,12 +99,28 @@ public class TimetableController {
 
     // ─── POST /api/timetable/validate ───────────────────────────────────────────
     public static String validateTimetable(String timetableJson) throws IOException {
-        List<Map<String, Object>> timetable = parseList(timetableJson);
-        List<Map<String, Object>> courses   = loadDataList(COURSES_FILE);
-        List<Map<String, Object>> faculty   = loadDataList(FACULTY_FILE);
-        List<Map<String, Object>> rooms     = loadDataList(ROOMS_FILE);
+        List<Map<String, Object>> newEntries = parseList(timetableJson);
+        List<Map<String, Object>> savedAll   = loadDataList(TIMETABLE_FILE);
+        List<Map<String, Object>> courses    = loadDataList(COURSES_FILE);
+        List<Map<String, Object>> faculty    = loadDataList(FACULTY_FILE);
+        List<Map<String, Object>> rooms      = loadDataList(ROOMS_FILE);
 
-        ValidationEngine.ValidationResult result = ValidationEngine.validate(timetable, courses, faculty, rooms);
+        // Determine which existing entries are from OTHER semester/dept combos
+        // (so we can check cross-semester clashes for the entries being validated)
+        String newDept = newEntries.isEmpty() ? "" : ValidationEngine.safeStr(newEntries.get(0), "dept");
+        String newSem  = newEntries.isEmpty() ? "" :
+                (newEntries.get(0).get("semester") != null ? newEntries.get(0).get("semester").toString() : "");
+        List<Map<String, Object>> existingOther = new ArrayList<>();
+        for (Map<String, Object> e : savedAll) {
+            String d = ValidationEngine.safeStr(e, "dept");
+            String s = e.get("semester") != null ? e.get("semester").toString() : "";
+            if (!(d != null && d.equalsIgnoreCase(newDept) && s.equals(newSem))) {
+                existingOther.add(e);
+            }
+        }
+
+        ValidationEngine.ValidationResult result =
+                ValidationEngine.validateFull(newEntries, existingOther, courses, faculty, rooms);
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("hardViolations", result.hardCount);
@@ -112,8 +128,9 @@ public class TimetableController {
         resp.put("overallScore", result.overallScore);
         resp.put("conflicts", result.conflicts);
         resp.put("softConstraintViolations", result.softViolations);
-        resp.put("facultyWorkload", calculateFacultyWorkload(timetable, faculty));
-        resp.put("roomUtilization", calculateRoomUtilization(timetable, rooms));
+        resp.put("staffingAlerts", result.staffingAlerts);
+        resp.put("facultyWorkload", calculateFacultyWorkload(newEntries, faculty));
+        resp.put("roomUtilization", calculateRoomUtilization(newEntries, rooms));
         return JsonUtil.toJson(resp);
     }
 
@@ -155,28 +172,44 @@ public class TimetableController {
             return JsonUtil.toJson(err);
         }
 
+        // Load full existing timetable — entries from OTHER semesters/depts
+        // These are passed to AI and validator for cross-semester clash detection
+        List<Map<String, Object>> allSaved = loadDataList(TIMETABLE_FILE);
+        final String targetComboKey = (dept + "@" + semester).toLowerCase();
+        List<Map<String, Object>> existingOtherSemesters = new ArrayList<>();
+        for (Map<String, Object> entry : allSaved) {
+            String d = entry.get("dept") != null ? entry.get("dept").toString() : "";
+            String s = entry.get("semester") != null ? entry.get("semester").toString() : "";
+            if (!(d.equalsIgnoreCase(dept) && s.equals(semester))) {
+                existingOtherSemesters.add(entry);
+            }
+        }
+        System.out.println("[TimetableController] Cross-semester context: " +
+                existingOtherSemesters.size() + " existing entries from other semesters");
+
         String apiKey = GroqClient.getApiKey();
         boolean useAI = "ai".equalsIgnoreCase(algorithm) && !apiKey.isEmpty();
 
         if (useAI) {
-            System.out.println("[TimetableController] Using AI generation (Groq Llama 3.3)...");
+            System.out.println("[TimetableController] Using AI generation (Groq Llama 3.3) with cross-semester awareness...");
             try {
                 return AIService.generate(filteredCourses, faculty, rooms, dept, semester, section,
-                        constraints, customCommand, DAYS, SLOTS, scheduleType);
+                        constraints, customCommand, DAYS, SLOTS, scheduleType, existingOtherSemesters);
             } catch (Exception e) {
                 System.err.println("[TimetableController] AI generation failed, falling back to local solver: " + e.getMessage());
             }
         }
 
-        System.out.println("[TimetableController] Using local greedy solver...");
-        return generateWithLocalSolver(filteredCourses, faculty, rooms, dept, semester, section, constraints, scheduleType);
+        System.out.println("[TimetableController] Using local greedy solver with cross-semester awareness...");
+        return generateWithLocalSolverFull(filteredCourses, faculty, rooms,
+                dept, semester, section, constraints, scheduleType, existingOtherSemesters);
     }
 
     // ─── POST /api/timetable/auto-fix ───────────────────────────────────────────
     @SuppressWarnings("unchecked")
     public static String autoFixTimetable(String requestBody) throws Exception {
-        Map<String, Object> body         = (Map<String, Object>) JsonUtil.parse(requestBody);
-        List<Map<String, Object>> currentTimetable = (List<Map<String, Object>>) body.get("currentTimetable");
+        Map<String, Object> body             = (Map<String, Object>) JsonUtil.parse(requestBody);
+        List<Map<String, Object>> fixTarget  = (List<Map<String, Object>>) body.get("currentTimetable");
         String dept     = (String) body.get("dept");
         String semester = body.get("semester") != null ? body.get("semester").toString() : "5";
 
@@ -193,85 +226,341 @@ public class TimetableController {
             }
         }
 
-        String apiKey = GroqClient.getApiKey();
+        // Load full saved timetable — split into:
+        //   existingOther = OTHER semesters/depts (must not clash with our fix)
+        //   (the target semester entries are what we are fixing)
+        List<Map<String, Object>> allSaved    = loadDataList(TIMETABLE_FILE);
+        final String targetKey = (dept + "@" + semester).toLowerCase();
+        List<Map<String, Object>> existingOther = new ArrayList<>();
+        for (Map<String, Object> entry : allSaved) {
+            String d = entry.get("dept") != null ? entry.get("dept").toString() : "";
+            String s = entry.get("semester") != null ? entry.get("semester").toString() : "";
+            if (!(d.equalsIgnoreCase(dept) && s.equals(semester))) {
+                existingOther.add(entry);
+            }
+        }
+
+        System.out.println("[TimetableController] Auto-fix: " + (fixTarget != null ? fixTarget.size() : 0) +
+                " entries to fix | " + existingOther.size() + " entries from other semesters");
+
+        // Run initial cross-semester validation to know what to fix
+        ValidationEngine.ValidationResult preCheck =
+                ValidationEngine.validateFull(fixTarget != null ? fixTarget : List.of(),
+                        existingOther, courses, faculty, rooms);
+        System.out.println("[TimetableController] Pre-fix: " + preCheck.hardCount + " hard, " +
+                preCheck.softCount + " soft violations");
+
         List<Map<String, Object>> optimizedTimetable = null;
+        String apiKey = GroqClient.getApiKey();
 
-        if (!apiKey.isEmpty()) {
-            String systemPrompt = "You are an AI Timetable Optimization Engine. " +
-                    "Fix ALL constraint violations in the given timetable. " +
-                    "Hard Constraints: No faculty clash, no room clash, no section clash, " +
-                    "no lunch break (12:00-1:00) classes, no consecutive lab blocks broken. " +
-                    "Return ONLY valid JSON: {\"timetable\": [...]}";
+        if (!apiKey.isEmpty() && fixTarget != null && !fixTarget.isEmpty()) {
+            // Build an occupancy map of rooms/faculty already taken by other semesters
+            Map<String, String> occupiedRooms   = new LinkedHashMap<>();
+            Map<String, String> occupiedFaculty = new LinkedHashMap<>();
+            for (Map<String, Object> e : existingOther) {
+                String d = ValidationEngine.safeStr(e, "day");
+                String sl= ValidationEngine.safeStr(e, "slot");
+                String r = ValidationEngine.safeStr(e, "room");
+                String f = ValidationEngine.safeStr(e, "faculty");
+                if (d != null && sl != null) {
+                    if (r != null) occupiedRooms.put(r + "@" + d + "@" + sl,
+                            "Sem" + e.getOrDefault("semester","?") + "/" + e.getOrDefault("dept","?"));
+                    if (f != null) occupiedFaculty.put(f + "@" + d + "@" + sl,
+                            "Sem" + e.getOrDefault("semester","?") + "/" + e.getOrDefault("dept","?"));
+                }
+            }
 
-            String userPrompt = "Fix this timetable:\n" + JsonUtil.toJson(currentTimetable) + "\n\n" +
-                    "Courses: " + JsonUtil.toJson(filteredCourses) + "\n" +
-                    "Faculty: " + JsonUtil.toJson(faculty) + "\n" +
-                    "Rooms: " + JsonUtil.toJson(rooms) + "\n" +
-                    "Dept: " + dept + ", Semester: " + semester + "\n" +
-                    "Return only JSON with key 'timetable'.";
+            String systemPrompt = PromptBuilder.buildSystemPrompt("tight");
 
-            for (int attempt = 1; attempt <= 3; attempt++) {
+            StringBuilder userPrompt = new StringBuilder();
+            userPrompt.append("FIX this timetable to resolve ALL constraint violations.\n\n");
+
+            // Describe exact violations
+            if (!preCheck.conflicts.isEmpty()) {
+                userPrompt.append("=== VIOLATIONS TO FIX ===\n");
+                for (Map<String, Object> c : preCheck.conflicts) {
+                    userPrompt.append("  [").append(c.get("type")).append("] ")
+                              .append(c.get("desc"))
+                              .append(" — ").append(c.get("day")).append(" ").append(c.get("slot"))
+                              .append("\n");
+                }
+                userPrompt.append("\n");
+            }
+
+            userPrompt.append("=== ALREADY OCCUPIED SLOTS (DO NOT USE THESE) ===\n");
+            userPrompt.append("Rooms occupied by other semesters: ").append(JsonUtil.toJson(occupiedRooms)).append("\n");
+            userPrompt.append("Faculty occupied by other semesters: ").append(JsonUtil.toJson(occupiedFaculty)).append("\n\n");
+
+            userPrompt.append("=== RULES ===\n");
+            userPrompt.append("- No faculty clash (including cross-semester clashes above)\n");
+            userPrompt.append("- No room clash (including cross-semester clashes above)\n");
+            userPrompt.append("- Room capacity >= student count of the course\n");
+            userPrompt.append("- No 12:00-1:00 classes (lunch break)\n");
+            userPrompt.append("- Lab courses must use Lab rooms, in consecutive slots\n");
+            userPrompt.append("- If a faculty is overloaded, include 'staffingAlerts' array\n\n");
+
+            userPrompt.append("=== CURRENT TIMETABLE (fix it) ===\n");
+            userPrompt.append(JsonUtil.toJson(fixTarget)).append("\n\n");
+
+            userPrompt.append("=== AVAILABLE RESOURCES ===\n");
+            userPrompt.append("Courses: ").append(JsonUtil.toJson(filteredCourses)).append("\n");
+            userPrompt.append("Faculty: ").append(JsonUtil.toJson(faculty)).append("\n");
+            userPrompt.append("Rooms (check capacity!): ").append(JsonUtil.toJson(rooms)).append("\n");
+            userPrompt.append("Days: ").append(DAYS).append("\n");
+            userPrompt.append("Slots: ").append(SLOTS).append("\n\n");
+            userPrompt.append("Return JSON with key 'timetable'. ONLY JSON, no explanations.");
+
+            String currentPrompt = userPrompt.toString();
+
+            for (int attempt = 1; attempt <= 4; attempt++) {
+                System.out.println("[TimetableController] Auto-fix AI attempt " + attempt + "...");
                 try {
-                    System.out.println("[TimetableController] Auto-fix AI attempt " + attempt + "...");
-                    String aiResponse = GroqClient.callGroq(systemPrompt, userPrompt);
+                    String aiResponse = GroqClient.callGroq(systemPrompt, currentPrompt);
                     Map<String, Object> parsed = ResponseParser.parseResponse(aiResponse);
-
-                    // Try multiple key names
                     List<Map<String, Object>> candidate = extractListFromMap(parsed);
+
                     if (candidate != null && !candidate.isEmpty()) {
-                        ValidationEngine.ValidationResult val = ValidationEngine.validate(candidate, courses, faculty, rooms);
-                        System.out.println("[TimetableController] Auto-fix attempt " + attempt + ": " + val.hardCount + " hard violations");
+                        // Normalize types
+                        List<Map<String, Object>> normalized = new ArrayList<>();
+                        for (Map<String, Object> e : candidate) {
+                            Map<String, Object> en = new LinkedHashMap<>(e);
+                            Object sem = en.get("semester");
+                            if (sem instanceof String ss) { try { en.put("semester", Integer.parseInt(ss.trim())); } catch(NumberFormatException ignored){} }
+                            else if (sem instanceof Number n) en.put("semester", n.intValue());
+                            normalized.add(en);
+                        }
+
+                        ValidationEngine.ValidationResult val =
+                                ValidationEngine.validateFull(normalized, existingOther, courses, faculty, rooms);
+                        System.out.printf("[TimetableController] Auto-fix attempt %d: %d hard | %d soft%n",
+                                attempt, val.hardCount, val.softCount);
+
                         if (val.hardCount == 0) {
-                            optimizedTimetable = candidate;
+                            optimizedTimetable = normalized;
                             break;
                         }
-                        if (attempt == 3) optimizedTimetable = candidate; // use best effort
+                        // Build repair prompt for next attempt
+                        if (attempt < 4) {
+                            currentPrompt = PromptBuilder.buildRepairPrompt(
+                                    userPrompt.toString(),
+                                    JsonUtil.toJson(normalized),
+                                    val.conflicts,
+                                    val.softViolations);
+                        }
+                        if (attempt == 4) optimizedTimetable = normalized; // best-effort
                     }
                 } catch (Exception e) {
                     System.err.println("[TimetableController] Auto-fix attempt " + attempt + " failed: " + e.getMessage());
                 }
-                if (attempt < 3) Thread.sleep(2000);
+                if (attempt < 4) Thread.sleep(2000);
             }
         }
 
-        // Fallback: rebuild with local solver
+        // Fallback: rebuild with local solver (cross-semester aware)
         if (optimizedTimetable == null) {
             System.out.println("[TimetableController] AI auto-fix unavailable, rebuilding with local solver...");
-            String localResult = generateWithLocalSolver(filteredCourses, faculty, rooms,
-                    dept, semester, "All", Map.of("maxPerDay", 5, "lunchBreak", true, "labContiguous", true), "tight");
+            String localResult = generateWithLocalSolverFull(filteredCourses, faculty, rooms,
+                    dept, semester, "All",
+                    Map.of("maxPerDay", 5, "lunchBreak", true, "labContiguous", true, "avoidSaturday", true),
+                    "tight", existingOther);
             Map<String, Object> localParsed = (Map<String, Object>) JsonUtil.parse(localResult);
             optimizedTimetable = (List<Map<String, Object>>) localParsed.get("timetable");
         }
 
-        // Merge back into full timetable (preserve other dept/semester entries)
-        List<Map<String, Object>> existing = loadDataList(TIMETABLE_FILE);
-        List<Map<String, Object>> merged   = new ArrayList<>();
-        final String targetKey = (dept + "@" + semester).toLowerCase();
-        for (Map<String, Object> entry : existing) {
-            String k = (entry.get("dept") + "@" + entry.get("semester")).toLowerCase();
-            if (!k.equals(targetKey)) merged.add(entry);
-        }
+        // Persist: replace target semester entries with the fixed ones
+        List<Map<String, Object>> merged = new ArrayList<>(existingOther);
         merged.addAll(optimizedTimetable);
+        Files.createDirectories(TIMETABLE_FILE.getParent());
+        Files.writeString(TIMETABLE_FILE, JsonUtil.toJson(merged), StandardCharsets.UTF_8);
 
-        ValidationEngine.ValidationResult val = ValidationEngine.validate(merged, courses, faculty, rooms);
+        // Final cross-semester validation
+        ValidationEngine.ValidationResult finalVal =
+                ValidationEngine.validateFull(optimizedTimetable, existingOther, courses, faculty, rooms);
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("timetable", merged);
-        resp.put("hardViolations", val.hardCount);
-        resp.put("softViolations", val.softCount);
-        resp.put("overallScore", val.overallScore);
-        resp.put("conflicts", val.conflicts);
-        resp.put("softConstraintViolations", val.softViolations);
+        resp.put("hardViolations", finalVal.hardCount);
+        resp.put("softViolations", finalVal.softCount);
+        resp.put("overallScore", finalVal.overallScore);
+        resp.put("conflicts", finalVal.conflicts);
+        resp.put("softConstraintViolations", finalVal.softViolations);
+        resp.put("staffingAlerts", finalVal.staffingAlerts);
         resp.put("facultyWorkload", calculateFacultyWorkload(merged, faculty));
         resp.put("roomUtilization", calculateRoomUtilization(merged, rooms));
-
         Map<String, Object> scoreMap = new LinkedHashMap<>();
-        scoreMap.put("hardViolations", val.hardCount);
-        scoreMap.put("softViolations", val.softCount);
-        scoreMap.put("overallScore", val.overallScore);
+        scoreMap.put("hardViolations", finalVal.hardCount);
+        scoreMap.put("softViolations", finalVal.softCount);
+        scoreMap.put("overallScore", finalVal.overallScore);
         resp.put("score", scoreMap);
-
         return JsonUtil.toJson(resp);
+    }
+
+    // ─── POST /api/timetable/resolve-conflicts ───────────────────────────────────
+    /**
+     * Intelligently resolves all hard constraint violations in the full saved timetable
+     * by RESCHEDULING conflicting entries to free slots.
+     *
+     * Nothing is ever removed — same courses, same teachers, same sections.
+     * Only the (day, slot, room) of conflicting entries is changed.
+     *
+     * Returns:
+     *   - before/after score comparison
+     *   - what was moved and why (moveLog)
+     *   - updated timetable
+     *   - staffingAlerts if faculty overload detected
+     */
+    @SuppressWarnings("unchecked")
+    public static String resolveConflicts(String requestBody) throws Exception {
+        // Optional filter by dept+semester (if provided, only resolve that subset)
+        Map<String, Object> body = requestBody != null && !requestBody.isBlank()
+                ? (Map<String, Object>) JsonUtil.parse(requestBody)
+                : new LinkedHashMap<>();
+        String filterDept = body.containsKey("dept")     ? body.get("dept").toString()     : null;
+        String filterSem  = body.containsKey("semester") ? body.get("semester").toString() : null;
+
+        List<Map<String, Object>> courses = loadDataList(COURSES_FILE);
+        List<Map<String, Object>> faculty = loadDataList(FACULTY_FILE);
+        List<Map<String, Object>> rooms   = loadDataList(ROOMS_FILE);
+        List<Map<String, Object>> allSaved = loadDataList(TIMETABLE_FILE);
+
+        if (allSaved.isEmpty()) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", "No timetable data found. Please generate a timetable first.");
+            err.put("hardViolations", 0);
+            err.put("softViolations", 0);
+            err.put("overallScore", 100);
+            return JsonUtil.toJson(err);
+        }
+
+        // ── Before score ──────────────────────────────────────────────────────
+        ValidationEngine.ValidationResult before =
+                ValidationEngine.validateFull(allSaved, List.of(), courses, faculty, rooms);
+        System.out.printf("[resolveConflicts] BEFORE: %d hard, %d soft, score=%d%%%n",
+                before.hardCount, before.softCount, before.overallScore);
+
+        if (before.hardCount == 0 && before.softCount == 0) {
+            Map<String, Object> resp = new LinkedHashMap<>();
+            resp.put("message", "✅ Timetable already has 0 violations — nothing to fix!");
+            resp.put("timetable", allSaved);
+            resp.put("moveLog", List.of());
+            resp.put("movesApplied", 0);
+            resp.put("before", scoreMap(before));
+            resp.put("after",  scoreMap(before));
+            resp.put("staffingAlerts", before.staffingAlerts);
+            resp.put("conflicts", before.conflicts);
+            resp.put("softConstraintViolations", before.softViolations);
+            return JsonUtil.toJson(resp);
+        }
+
+        // ── Split timetable by dept+semester groups ───────────────────────────
+        // We process each group so cross-semester context is always maintained
+        Map<String, List<Map<String, Object>>> groups = new LinkedHashMap<>();
+        for (Map<String, Object> entry : allSaved) {
+            String d = entry.get("dept")     != null ? entry.get("dept").toString() : "?";
+            String s = entry.get("semester") != null ? entry.get("semester").toString() : "?";
+            String k = d + "@" + s;
+            if (filterDept != null && filterSem != null) {
+                // Only process the filtered group
+                if (!d.equalsIgnoreCase(filterDept) || !s.equals(filterSem)) continue;
+            }
+            groups.computeIfAbsent(k, x -> new ArrayList<>()).add(new LinkedHashMap<>(entry));
+        }
+
+        if (groups.isEmpty()) {
+            Map<String, Object> err = new LinkedHashMap<>();
+            err.put("error", "No entries found for the specified filter.");
+            return JsonUtil.toJson(err);
+        }
+
+        // ── Resolve each group independently ─────────────────────────────────
+        // The "existingOther" for each group = everything NOT in that group
+        List<Map<String, Object>> resolvedAll = new ArrayList<>();
+        List<String> allMoveLogs = new ArrayList<>();
+        int totalMoves = 0;
+
+        for (Map.Entry<String, List<Map<String, Object>>> groupEntry : groups.entrySet()) {
+            String groupKey = groupEntry.getKey();
+            List<Map<String, Object>> groupEntries = groupEntry.getValue();
+
+            // Build existingOther = everything in allSaved that is NOT this group
+            List<Map<String, Object>> existingOther = new ArrayList<>();
+            for (Map<String, Object> e : allSaved) {
+                String d = e.get("dept")     != null ? e.get("dept").toString() : "?";
+                String s = e.get("semester") != null ? e.get("semester").toString() : "?";
+                if (!(d + "@" + s).equals(groupKey)) existingOther.add(e);
+            }
+
+            System.out.println("[resolveConflicts] Resolving group: " + groupKey +
+                    " (" + groupEntries.size() + " entries, " + existingOther.size() + " other)");
+
+            ConflictResolver.ResolveResult result =
+                    ConflictResolver.resolve(groupEntries, existingOther, courses, faculty, rooms);
+
+            resolvedAll.addAll(result.timetable);
+            allMoveLogs.addAll(result.moveLog);
+            totalMoves += result.movesApplied;
+        }
+
+        // If we filtered, also keep the entries that were not in scope
+        if (filterDept != null && filterSem != null) {
+            for (Map<String, Object> entry : allSaved) {
+                String d = entry.get("dept")     != null ? entry.get("dept").toString() : "?";
+                String s = entry.get("semester") != null ? entry.get("semester").toString() : "?";
+                if (!d.equalsIgnoreCase(filterDept) || !s.equals(filterSem)) {
+                    resolvedAll.add(entry);
+                }
+            }
+        }
+
+        // ── Save resolved timetable ────────────────────────────────────────────
+        Files.createDirectories(TIMETABLE_FILE.getParent());
+        Files.writeString(TIMETABLE_FILE, JsonUtil.toJson(resolvedAll), StandardCharsets.UTF_8);
+
+        // ── After score ────────────────────────────────────────────────────────
+        ValidationEngine.ValidationResult after =
+                ValidationEngine.validateFull(resolvedAll, List.of(), courses, faculty, rooms);
+        System.out.printf("[resolveConflicts] AFTER:  %d hard, %d soft, score=%d%% (%d moves)%n",
+                after.hardCount, after.softCount, after.overallScore, totalMoves);
+
+        // ── Build response ─────────────────────────────────────────────────────
+        Map<String, Object> resp = new LinkedHashMap<>();
+
+        // Summary message
+        int improvedBy = before.hardCount - after.hardCount;
+        if (after.hardCount == 0) {
+            resp.put("message", "✅ All " + before.hardCount + " hard violations resolved! Score improved from " +
+                    before.overallScore + "% → " + after.overallScore + "%");
+        } else if (improvedBy > 0) {
+            resp.put("message", "⚠ Reduced hard violations from " + before.hardCount + " → " + after.hardCount +
+                    " (" + improvedBy + " fixed). Score: " + before.overallScore + "% → " + after.overallScore + "%");
+        } else {
+            resp.put("message", "ℹ " + after.hardCount + " hard violations remain — no free slots available for further rescheduling.");
+        }
+
+        resp.put("movesApplied",    totalMoves);
+        resp.put("moveLog",         allMoveLogs);
+        resp.put("before",          scoreMap(before));
+        resp.put("after",           scoreMap(after));
+        resp.put("timetable",       resolvedAll);
+        resp.put("hardViolations",  after.hardCount);
+        resp.put("softViolations",  after.softCount);
+        resp.put("overallScore",    after.overallScore);
+        resp.put("conflicts",       after.conflicts);
+        resp.put("softConstraintViolations", after.softViolations);
+        resp.put("staffingAlerts",  after.staffingAlerts);
+        resp.put("facultyWorkload", calculateFacultyWorkload(resolvedAll, faculty));
+        resp.put("roomUtilization", calculateRoomUtilization(resolvedAll, rooms));
+        resp.put("score",           scoreMap(after));
+        return JsonUtil.toJson(resp);
+    }
+
+    /** Build a score summary map. */
+    private static Map<String, Object> scoreMap(ValidationEngine.ValidationResult val) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("hardViolations", val.hardCount);
+        m.put("softViolations", val.softCount);
+        m.put("overallScore",   val.overallScore);
+        return m;
     }
 
     // ─── POST /api/timetable/suggest ────────────────────────────────────────────
@@ -285,6 +574,7 @@ public class TimetableController {
 
         return getLocalSuggestions(body, courses, faculty, rooms);
     }
+
 
     // ─── POST /api/timetable/chat ────────────────────────────────────────────────
     @SuppressWarnings("unchecked")
@@ -361,7 +651,8 @@ public class TimetableController {
         List<Map<String, Object>> faculty   = loadDataList(FACULTY_FILE);
         List<Map<String, Object>> rooms     = loadDataList(ROOMS_FILE);
 
-        ValidationEngine.ValidationResult validation = ValidationEngine.validate(timetable, courses, faculty, rooms);
+        ValidationEngine.ValidationResult validation =
+                ValidationEngine.validateFull(timetable, List.of(), courses, faculty, rooms);
 
         // Department + semester breakdown
         Map<String, Integer> deptCount = new LinkedHashMap<>();
@@ -383,6 +674,7 @@ public class TimetableController {
         resp.put("overallScore", validation.overallScore);
         resp.put("conflicts", validation.conflicts);
         resp.put("softConstraintViolations", validation.softViolations);
+        resp.put("staffingAlerts", validation.staffingAlerts);
         resp.put("facultyWorkload", calculateFacultyWorkload(timetable, faculty));
         resp.put("roomUtilization", calculateRoomUtilization(timetable, rooms));
         resp.put("deptBreakdown", deptCount);
@@ -505,11 +797,29 @@ public class TimetableController {
         return JsonUtil.toJson(result);
     }
 
-    // ─── Local Greedy Constraint Solver ─────────────────────────────────────────
-    interface FreeChecker {
-        boolean test(String facId, String roomId, String secKey, String day, String slot);
+    /**
+     * Cross-semester aware wrapper for the local greedy solver.
+     * Pre-seeds occupancy from existingOtherEntries so rooms and faculty
+     * already used by other semesters are treated as unavailable.
+     */
+    private static String generateWithLocalSolverFull(
+            List<Map<String, Object>> courses,
+            List<Map<String, Object>> faculty,
+            List<Map<String, Object>> rooms,
+            String dept, String semester, String section,
+            Map<String, Object> constraints,
+            String scheduleType,
+            List<Map<String, Object>> existingOtherEntries
+    ) {
+        // We'll pass pre-occupied slots into the solver via a modified constraint map
+        // The solver pre-seeds occupancy from existingOtherEntries
+        return generateWithLocalSolverInternal(
+                courses, faculty, rooms, dept, semester, section,
+                constraints, scheduleType,
+                existingOtherEntries != null ? existingOtherEntries : List.of());
     }
 
+    /** Legacy wrapper — no cross-semester context */
     private static String generateWithLocalSolver(
             List<Map<String, Object>> courses,
             List<Map<String, Object>> faculty,
@@ -517,6 +827,25 @@ public class TimetableController {
             String dept, String semester, String section,
             Map<String, Object> constraints,
             String scheduleType
+    ) {
+        return generateWithLocalSolverInternal(
+                courses, faculty, rooms, dept, semester, section,
+                constraints, scheduleType, List.of());
+    }
+
+    // ─── Local Greedy Constraint Solver ─────────────────────────────────────────
+    interface FreeChecker {
+        boolean test(String facId, String roomId, String secKey, String day, String slot);
+    }
+
+    private static String generateWithLocalSolverInternal(
+            List<Map<String, Object>> courses,
+            List<Map<String, Object>> faculty,
+            List<Map<String, Object>> rooms,
+            String dept, String semester, String section,
+            Map<String, Object> constraints,
+            String scheduleType,
+            List<Map<String, Object>> existingOtherEntries
     ) {
         List<Map<String, Object>> timetable   = new ArrayList<>();
         Map<String, Integer> roomClassCount   = new HashMap<>();
@@ -526,6 +855,29 @@ public class TimetableController {
         Set<String> occupiedFac  = new HashSet<>();
         Set<String> occupiedRoom = new HashSet<>();
         Set<String> occupiedSec  = new HashSet<>();
+
+        // Pre-seed occupancy from other semesters — cross-semester clash prevention
+        for (Map<String, Object> entry : existingOtherEntries) {
+            if (entry == null) continue;
+            String d = ValidationEngine.safeStr(entry, "day");
+            String sl= ValidationEngine.safeStr(entry, "slot");
+            String f = ValidationEngine.safeStr(entry, "faculty");
+            String r = ValidationEngine.safeStr(entry, "room");
+            if (d == null || sl == null) continue;
+            if (f != null) occupiedFac.add(f + "@" + d + "@" + sl);
+            if (r != null) occupiedRoom.add(r + "@" + d + "@" + sl);
+        }
+        System.out.println("[LocalSolver] Pre-seeded " + occupiedFac.size() +
+                " faculty slots and " + occupiedRoom.size() + " room slots from other semesters.");
+
+        // Build room capacity lookup for fast access
+        Map<String, Integer> roomCapacity = new HashMap<>();
+        for (Map<String, Object> r : rooms) {
+            if (r != null && r.get("id") != null && r.get("capacity") != null) {
+                try { roomCapacity.put(r.get("id").toString(), ((Number) r.get("capacity")).intValue()); }
+                catch (Exception ignored) {}
+            }
+        }
 
         boolean avoidSaturday = Boolean.TRUE.equals(constraints.get("avoidSaturday"));
         int maxPerDay = constraints.containsKey("maxPerDay")
@@ -568,6 +920,14 @@ public class TimetableController {
             // Find assigned faculty
             String facId = findFacultyForCourse(courseId, faculty);
 
+            // Student count for room capacity check
+            int students = 50; // default
+            if (course.containsKey("studentsCount")) {
+                try { students = ((Number) course.get("studentsCount")).intValue(); } catch (Exception ignored) {}
+            } else if (course.containsKey("capacity")) {
+                try { students = ((Number) course.get("capacity")).intValue(); } catch (Exception ignored) {}
+            }
+
             // Determine sections to schedule
             List<String> targetSecs = new ArrayList<>();
             if ("All".equalsIgnoreCase(section)) {
@@ -600,6 +960,9 @@ public class TimetableController {
                             for (Map<String, Object> room : sortedRooms) {
                                 if ("Lab".equalsIgnoreCase((String) room.get("type"))) continue;
                                 String roomId = (String) room.get("id");
+                                // Skip rooms too small for this course
+                                int cap = roomCapacity.getOrDefault(roomId, Integer.MAX_VALUE);
+                                if (cap > 0 && cap < students) continue;
                                 if (isFree.test(facId, roomId, secKey, day, slot)) {
                                     timetable.add(createEntry(day, slot, courseId, facId, roomId, sec, semester, dept, courseColor));
                                     occupy(occupiedFac, occupiedRoom, occupiedSec, facultyDayCount,
@@ -618,12 +981,14 @@ public class TimetableController {
             }
         }
 
-        ValidationEngine.ValidationResult result = ValidationEngine.validate(timetable, courses, faculty, rooms);
+        ValidationEngine.ValidationResult result =
+                ValidationEngine.validateFull(timetable, existingOtherEntries, courses, faculty, rooms);
 
         Map<String, Object> resp = new LinkedHashMap<>();
         resp.put("timetable", timetable);
         resp.put("conflicts", result.conflicts);
         resp.put("softConstraintViolations", result.softViolations);
+        resp.put("staffingAlerts", result.staffingAlerts);
         resp.put("facultyWorkload", calculateFacultyWorkload(timetable, faculty));
         resp.put("roomUtilization", calculateRoomUtilization(timetable, rooms));
         Map<String, Object> scoreMap = new LinkedHashMap<>();

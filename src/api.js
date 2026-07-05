@@ -104,3 +104,13 @@ export function importCollection(collection, csvContent) {
   });
 }
 
+export function resolveConflicts(options = {}) {
+  return request('/timetable/resolve-conflicts', {
+    method: 'POST',
+    body: JSON.stringify(options),
+  });
+}
+
+export function getAnalytics() {
+  return request('/analytics');
+}
