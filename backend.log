@@ -1,0 +1,2 @@
+Simple Java backend running at http://localhost:8080/api
+Endpoints: /api/courses, /api/faculty, /api/rooms

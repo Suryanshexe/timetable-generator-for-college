@@ -1,0 +1,12 @@
+[
+  {"id":"CS201","name":"Data Structures","credits":4,"dept":"CSE","type":"Theory","semester":3,"sections":["A","B"]},
+  {"id":"CS301","name":"Algorithms","credits":4,"dept":"CSE","type":"Theory","semester":5,"sections":["A","B"]},
+  {"id":"CS302","name":"Database Systems","credits":4,"dept":"CSE","type":"Theory","semester":5,"sections":["A","B"]},
+  {"id":"CS-LAB2","name":"DB Lab","credits":2,"dept":"CSE","type":"Lab","semester":5,"sections":["A","B"]},
+  {"id":"CS699","name":"CyberSecurity","credits":3,"dept":"CSE","type":"Theory","semester":5,"sections":["A"],"facultyId":""},
+  {"id":"CS101","name":"Basic Coding","credits":4,"dept":"CSE","type":"Theory","semester":1,"sections":["A"],"facultyId":""},
+  {"id":"PH102","name":"Phy","credits":4,"dept":"CSE","type":"Theory","semester":1,"sections":["A"],"facultyId":""},
+  {"id":"EN101","name":"English","credits":4,"dept":"CSE","type":"Theory","semester":1,"sections":["A"],"facultyId":""},
+  {"id":"MA101","name":"Maths","credits":4,"dept":"CSE","type":"Theory","semester":1,"sections":["A"],"facultyId":""},
+  {"id":"BA101","name":"Basic Algo","credits":4,"dept":"CSE","type":"Theory","semester":1,"sections":["A"],"facultyId":""}
+]
