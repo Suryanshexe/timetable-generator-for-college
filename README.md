@@ -1,6 +1,6 @@
 # JUIT Timetable Manager
 
-Simple React + Java demo for managing timetable courses, faculty, and rooms.
+Simple React + Java backend for managing timetable courses, faculty, and rooms.
 
 ## Run the Java backend
 
@@ -49,3 +49,5 @@ Runs the frontend test suite once.
 ### `npm run build`
 
 Builds the React app for production into the `build` folder.
+
+Trying to make it more user friendly and easier and more automated...
