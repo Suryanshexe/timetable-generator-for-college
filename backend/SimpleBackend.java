@@ -18,7 +18,7 @@ import java.util.regex.Pattern;
 public class SimpleBackend {
     private static final int PORT = 8080;
     private static final Path DATA_DIR = Path.of("backend", "data");
-    private static final List<String> COLLECTIONS = List.of("courses", "faculty", "rooms");
+    private static final List<String> COLLECTIONS = List.of("courses", "faculty", "rooms", "issues");
     private static final Pattern ID_PATTERN = Pattern.compile("\"id\"\\s*:\\s*\"([^\"]+)\"");
     private static final Map<String, LinkedHashMap<String, String>> store = new LinkedHashMap<>();
 

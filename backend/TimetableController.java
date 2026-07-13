@@ -913,6 +913,14 @@ public class TimetableController {
             if (f != null) occupiedFac.add(f + "@" + d + "@" + sl);
             if (r != null) occupiedRoom.add(r + "@" + d + "@" + sl);
         }
+        
+        Map<String, Integer> facultyTotalCount = new HashMap<>();
+        for (Map<String, Object> entry : existingOtherEntries) {
+            if (entry == null) continue;
+            String f = ValidationEngine.safeStr(entry, "faculty");
+            if (f != null) facultyTotalCount.merge(f, 1, Integer::sum);
+        }
+
         System.out.println("[LocalSolver] Pre-seeded " + occupiedFac.size() +
                 " faculty slots and " + occupiedRoom.size() + " room slots from other semesters.");
 
@@ -963,8 +971,8 @@ public class TimetableController {
             String courseColor = courseColorMap.computeIfAbsent(courseId, k -> COLORS[colorIdxForLambda % COLORS.length]);
             colorIdx = courseColorMap.size();
 
-            // Find assigned faculty
-            String facId = findFacultyForCourse(courseId, faculty);
+            // Find all assigned faculty
+            List<String> facIds = findAllFacultyForCourse(courseId, faculty);
 
             // Student count for room capacity check
             int students = 50; // default
@@ -992,8 +1000,8 @@ public class TimetableController {
                     int labBlocks = Math.max(1, credits / 2);
                     for (int lb = 0; lb < labBlocks; lb++) {
                         scheduleLabBlock(timetable, occupiedFac, occupiedRoom, occupiedSec,
-                                roomClassCount, facultyDayCount, activeDays, isFree,
-                                facId, courseId, sec, secKey, semester, dept, courseColor, scheduleType);
+                                roomClassCount, facultyDayCount, facultyTotalCount, activeDays, isFree,
+                                facIds, courseId, sec, secKey, semester, dept, courseColor, scheduleType);
                     }
                 } else {
                     // Schedule theory lectures (1h each)
@@ -1009,10 +1017,25 @@ public class TimetableController {
                                 // Skip rooms too small for this course
                                 int cap = roomCapacity.getOrDefault(roomId, Integer.MAX_VALUE);
                                 if (cap > 0 && cap < students) continue;
-                                if (isFree.test(facId, roomId, secKey, day, slot)) {
+
+                                String bestFac = null;
+                                int minLoad = Integer.MAX_VALUE;
+                                for (String fId : facIds) {
+                                    if (isFree.test(fId, roomId, secKey, day, slot)) {
+                                        int load = facultyTotalCount.getOrDefault(fId, 0);
+                                        if (load < minLoad) {
+                                            minLoad = load;
+                                            bestFac = fId;
+                                        }
+                                    }
+                                }
+
+                                if (bestFac != null) {
+                                    String facId = bestFac;
                                     timetable.add(createEntry(day, slot, courseId, facId, roomId, sec, semester, dept, courseColor));
                                     occupy(occupiedFac, occupiedRoom, occupiedSec, facultyDayCount,
                                             facId, roomId, secKey, day, slot);
+                                    facultyTotalCount.merge(facId, 1, Integer::sum);
                                     roomClassCount.merge(roomId, 1, Integer::sum);
                                     scheduled++;
                                     if ("easy".equalsIgnoreCase(scheduleType)) {
@@ -1052,8 +1075,9 @@ public class TimetableController {
             Set<String> occupiedFac, Set<String> occupiedRoom, Set<String> occupiedSec,
             Map<String, Integer> roomClassCount,
             Map<String, Map<String, Integer>> facultyDayCount,
+            Map<String, Integer> facultyTotalCount,
             List<String> activeDays, FreeChecker isFree,
-            String facId, String courseId, String sec, String secKey,
+            List<String> facIds, String courseId, String sec, String secKey,
             String semester, String dept, String courseColor, String scheduleType) {
 
         for (String day : activeDays) {
@@ -1067,14 +1091,28 @@ public class TimetableController {
                 for (Map<String, Object> room : sortedRooms) {
                     if (!"Lab".equalsIgnoreCase((String) room.get("type"))) continue;
                     String roomId = (String) room.get("id");
-                    if (isFree.test(facId, roomId, secKey, day, slot1) &&
-                        isFree.test(facId, roomId, secKey, day, slot2)) {
-
+                    
+                    String bestFac = null;
+                    int minLoad = Integer.MAX_VALUE;
+                    for (String fId : facIds) {
+                        if (isFree.test(fId, roomId, secKey, day, slot1) &&
+                            isFree.test(fId, roomId, secKey, day, slot2)) {
+                            int load = facultyTotalCount.getOrDefault(fId, 0);
+                            if (load < minLoad) {
+                                minLoad = load;
+                                bestFac = fId;
+                            }
+                        }
+                    }
+                    
+                    if (bestFac != null) {
+                        String facId = bestFac;
                         timetable.add(createEntry(day, slot1, courseId, facId, roomId, sec, semester, dept, courseColor));
                         timetable.add(createEntry(day, slot2, courseId, facId, roomId, sec, semester, dept, courseColor));
 
                         occupy(occupiedFac, occupiedRoom, occupiedSec, facultyDayCount, facId, roomId, secKey, day, slot1);
                         occupy(occupiedFac, occupiedRoom, occupiedSec, facultyDayCount, facId, roomId, secKey, day, slot2);
+                        facultyTotalCount.merge(facId, 2, Integer::sum);
                         roomClassCount.merge(roomId, 2, Integer::sum);
 
                         if ("easy".equalsIgnoreCase(scheduleType)) {
@@ -1245,14 +1283,18 @@ public class TimetableController {
 
     // ─── Private Helpers ────────────────────────────────────────────────────────
 
-    private static String findFacultyForCourse(String courseId, List<Map<String, Object>> faculty) {
+    private static List<String> findAllFacultyForCourse(String courseId, List<Map<String, Object>> faculty) {
+        List<String> assigned = new ArrayList<>();
         for (Map<String, Object> f : faculty) {
             Object fCourses = f.get("courses");
             if (fCourses instanceof List<?> list && list.contains(courseId)) {
-                return (String) f.get("id");
+                assigned.add((String) f.get("id"));
             }
         }
-        return faculty.isEmpty() ? "F01" : (String) faculty.get(0).get("id");
+        if (assigned.isEmpty()) {
+            assigned.add(faculty.isEmpty() ? "F01" : (String) faculty.get(0).get("id"));
+        }
+        return assigned;
     }
 
     private static List<Map<String, Object>> sortRoomsByLoad(

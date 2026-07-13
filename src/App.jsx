@@ -12,6 +12,7 @@ import GeneratePage from './pages/Generate';
 import ConflictsPage from './pages/ConflictCheck';
 import AnalyticsPage from './pages/Analytics';
 import AIChatPage from './pages/AIChat';
+import IssuesPage from './pages/Issues';
 
 function AppShell() {
   const [page, setPage] = useState('dashboard');
@@ -26,6 +27,7 @@ function AppShell() {
     conflicts: <ConflictsPage />,
     analytics: <AnalyticsPage />,
     chat: <AIChatPage />,
+    issues: <IssuesPage />,
   };
 
   return (

@@ -11,6 +11,7 @@ const NAV_ITEMS = {
       { label: 'Courses', icon: '📚', page: 'courses' },
       { label: 'Faculty', icon: '👤', page: 'faculty' },
       { label: 'Rooms', icon: '🏛', page: 'rooms' },
+      { label: 'Issues', icon: '💬', page: 'issues' },
     ]},
     { section: 'Timetable', items: [
       { label: 'Generate', icon: '⚙️', page: 'generate' },
@@ -23,6 +24,7 @@ const NAV_ITEMS = {
     { section: 'Overview', items: [
       { label: 'Dashboard', icon: '⬛', page: 'dashboard' },
       { label: 'My Schedule', icon: '📅', page: 'timetable' },
+      { label: 'Request Issue', icon: '⚠️', page: 'issues' },
     ]},
   ],
   [ROLES.STUDENT]: [
