@@ -226,8 +226,8 @@ export default function TimetableView() {
 
   const getUnassignedCourses = () => {
     if (viewType !== 'student') return [];
-    const semCourses = COURSES.filter(c => 
-      c.dept === selectedDept && 
+    const semCourses = COURSES.filter(c =>
+      c.dept === selectedDept &&
       String(c.semester) === String(selectedSemester) &&
       (c.sections ? c.sections.includes(selectedSection) : true)
     );
@@ -260,7 +260,7 @@ export default function TimetableView() {
     e.preventDefault();
     try {
       const draggedEntry = JSON.parse(e.dataTransfer.getData("text/plain"));
-      
+
       // Update entry day and slot
       const updatedEntries = entries.map(item => {
         if (item.course === draggedEntry.course && item.day === draggedEntry.day && item.slot === draggedEntry.slot && item.section === draggedEntry.section) {
@@ -308,7 +308,7 @@ export default function TimetableView() {
   const applySuggestion = (sug) => {
     if (!selectedCell || !selectedCell.entry) return;
     const targetEntry = selectedCell.entry;
-    
+
     const updated = entries.map(item => {
       if (item.course === targetEntry.course && item.day === targetEntry.day && item.slot === targetEntry.slot && item.section === targetEntry.section) {
         return { ...item, day: sug.newDay, slot: sug.newSlot, room: sug.newRoom };
@@ -353,7 +353,7 @@ export default function TimetableView() {
     <>
       <Navbar title="Active Timetable Dashboard" />
       <Box className="page" sx={{ p: 3 }}>
-        
+
         {/* Undo/Redo & Save status & Import/Export Bar */}
         <Paper
           sx={{
@@ -388,21 +388,7 @@ export default function TimetableView() {
           <Box sx={{ display: 'flex', gap: 1.5 }}>
             {isAdmin && (
               <>
-                <Button
-                  variant="contained"
-                  color="secondary"
-                  disabled={fixing}
-                  startIcon={fixing ? <CircularProgress size={16} color="inherit" /> : <AutoAwesomeIcon />}
-                  onClick={handleAutoFix}
-                  sx={{
-                    background: 'linear-gradient(45deg, #7b1fa2 30%, #e040fb 90%)',
-                    boxShadow: '0 3px 5px 2px rgba(224, 64, 251, .3)',
-                    color: 'white',
-                    fontWeight: 700
-                  }}
-                >
-                  {fixing ? 'Optimizing...' : 'Smart Fix (AI)'}
-                </Button>
+
                 <Button variant="outlined" color="error" startIcon={<DeleteSweepIcon />} onClick={() => setClearDialogOpen(true)}>
                   Clear / Reset
                 </Button>
@@ -423,7 +409,7 @@ export default function TimetableView() {
         <Box sx={{ display: 'flex', gap: 3, alignItems: 'flex-start', flexWrap: { xs: 'wrap', md: 'nowrap' } }}>
           {/* Main Timetable View */}
           <Box sx={{ flex: 1, minWidth: 0, width: '100%' }}>
-            
+
             {/* View filtering selectors */}
             <Card sx={{ mb: 3 }}>
               <CardContent sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -449,12 +435,12 @@ export default function TimetableView() {
                     </FormControl>
                     <FormControl variant="outlined" size="small" sx={{ minWidth: 100 }}>
                       <Select value={selectedSemester} onChange={e => setSelectedSemester(e.target.value)}>
-                        {[1,2,3,4,5,6,7,8].map(s => <MenuItem key={s} value={String(s)}>Sem {s}</MenuItem>)}
+                        {[1, 2, 3, 4, 5, 6, 7, 8].map(s => <MenuItem key={s} value={String(s)}>Sem {s}</MenuItem>)}
                       </Select>
                     </FormControl>
                     <FormControl variant="outlined" size="small" sx={{ minWidth: 100 }}>
                       <Select value={selectedSection} onChange={e => setSelectedSection(e.target.value)}>
-                        {['A','B','C'].map(s => <MenuItem key={s} value={s}>Sec {s}</MenuItem>)}
+                        {['A', 'B', 'C'].map(s => <MenuItem key={s} value={s}>Sec {s}</MenuItem>)}
                       </Select>
                     </FormControl>
                   </>
@@ -505,7 +491,7 @@ export default function TimetableView() {
                         <td style={{ fontWeight: 700, fontSize: 11, background: 'rgba(255,255,255,0.03)' }}>
                           {slot}
                         </td>
-                        
+
                         {/* Day cells */}
                         {DAYS.map(day => {
                           const entry = getCellEntry(day, slot);
@@ -562,7 +548,7 @@ export default function TimetableView() {
 
           {/* Right Panels: Score Card & Conflict Resolution & Suggestions */}
           <Box sx={{ width: { xs: '100%', md: 320 }, flexShrink: 0, display: 'flex', flexDirection: 'column' }}>
-            
+
             {/* Score Card */}
             <Card sx={{ mb: 3 }}>
               <CardContent sx={{ textAlign: 'center', p: 3 }}>

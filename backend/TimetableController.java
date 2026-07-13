@@ -107,14 +107,18 @@ public class TimetableController {
 
         // Determine which existing entries are from OTHER semester/dept combos
         // (so we can check cross-semester clashes for the entries being validated)
-        String newDept = newEntries.isEmpty() ? "" : ValidationEngine.safeStr(newEntries.get(0), "dept");
-        String newSem  = newEntries.isEmpty() ? "" :
-                (newEntries.get(0).get("semester") != null ? newEntries.get(0).get("semester").toString() : "");
+        Set<String> newGroups = new HashSet<>();
+        for (Map<String, Object> e : newEntries) {
+            String d = ValidationEngine.safeStr(e, "dept");
+            String s = e.get("semester") != null ? e.get("semester").toString() : "";
+            newGroups.add(d + "@" + s);
+        }
+
         List<Map<String, Object>> existingOther = new ArrayList<>();
         for (Map<String, Object> e : savedAll) {
             String d = ValidationEngine.safeStr(e, "dept");
             String s = e.get("semester") != null ? e.get("semester").toString() : "";
-            if (!(d != null && d.equalsIgnoreCase(newDept) && s.equals(newSem))) {
+            if (!newGroups.contains(d + "@" + s)) {
                 existingOther.add(e);
             }
         }
@@ -472,33 +476,73 @@ public class TimetableController {
             return JsonUtil.toJson(err);
         }
 
-        // ── Resolve each group independently ─────────────────────────────────
-        // The "existingOther" for each group = everything NOT in that group
+        // ── Resolve all groups with a global retry loop ──────────────────────
+        // Each pass resolves every group with the other groups as cross-semester
+        // context.  After each full pass we re-validate the complete merged
+        // timetable and repeat (up to MAX_GLOBAL_PASSES) until 0 hard violations.
+        final int MAX_GLOBAL_PASSES = 3;
         List<Map<String, Object>> resolvedAll = new ArrayList<>();
         List<String> allMoveLogs = new ArrayList<>();
         int totalMoves = 0;
 
-        for (Map.Entry<String, List<Map<String, Object>>> groupEntry : groups.entrySet()) {
-            String groupKey = groupEntry.getKey();
-            List<Map<String, Object>> groupEntries = groupEntry.getValue();
+        // Seed resolvedAll with the original entries so the first pass has a
+        // starting point when building existingOther for each group.
+        resolvedAll.addAll(allSaved);
 
-            // Build existingOther = everything in allSaved that is NOT this group
-            List<Map<String, Object>> existingOther = new ArrayList<>();
-            for (Map<String, Object> e : allSaved) {
-                String d = e.get("dept")     != null ? e.get("dept").toString() : "?";
-                String s = e.get("semester") != null ? e.get("semester").toString() : "?";
-                if (!(d + "@" + s).equals(groupKey)) existingOther.add(e);
+        for (int globalPass = 1; globalPass <= MAX_GLOBAL_PASSES; globalPass++) {
+            System.out.printf("[resolveConflicts] Global pass %d/%d%n", globalPass, MAX_GLOBAL_PASSES);
+
+            // Quick check: if no hard violations in the full merged set, we're done
+            ValidationEngine.ValidationResult quickCheck =
+                    ValidationEngine.validateFull(resolvedAll, List.of(), courses, faculty, rooms);
+            if (quickCheck.hardCount == 0 && globalPass > 1) {
+                allMoveLogs.add("✅ Global pass " + globalPass + ": 0 hard violations — done.");
+                break;
             }
 
-            System.out.println("[resolveConflicts] Resolving group: " + groupKey +
-                    " (" + groupEntries.size() + " entries, " + existingOther.size() + " other)");
+            // Build a fresh working set for this pass from the current resolvedAll
+            List<Map<String, Object>> passResolved = new ArrayList<>();
 
-            ConflictResolver.ResolveResult result =
-                    ConflictResolver.resolve(groupEntries, existingOther, courses, faculty, rooms);
+            for (Map.Entry<String, List<Map<String, Object>>> groupEntry : groups.entrySet()) {
+                String groupKey = groupEntry.getKey();
 
-            resolvedAll.addAll(result.timetable);
-            allMoveLogs.addAll(result.moveLog);
-            totalMoves += result.movesApplied;
+                // Reconstruct this group's current entries from resolvedAll
+                List<Map<String, Object>> groupEntries = new ArrayList<>();
+                for (Map<String, Object> e : resolvedAll) {
+                    String d = e.get("dept")     != null ? e.get("dept").toString() : "?";
+                    String s = e.get("semester") != null ? e.get("semester").toString() : "?";
+                    if ((d + "@" + s).equals(groupKey)) groupEntries.add(e);
+                }
+
+                // existingOther = everything in resolvedAll that is NOT this group
+                List<Map<String, Object>> existingOther = new ArrayList<>();
+                for (Map<String, Object> e : resolvedAll) {
+                    String d = e.get("dept")     != null ? e.get("dept").toString() : "?";
+                    String s = e.get("semester") != null ? e.get("semester").toString() : "?";
+                    if (!(d + "@" + s).equals(groupKey)) existingOther.add(e);
+                }
+
+                System.out.println("[resolveConflicts] Pass " + globalPass
+                        + " — group: " + groupKey
+                        + " (" + groupEntries.size() + " entries, "
+                        + existingOther.size() + " other)");
+
+                ConflictResolver.ResolveResult result =
+                        ConflictResolver.resolve(groupEntries, existingOther, courses, faculty, rooms);
+
+                passResolved.addAll(result.timetable);
+                allMoveLogs.addAll(result.moveLog);
+                totalMoves += result.movesApplied;
+            }
+
+            resolvedAll = passResolved;
+
+            // Re-validate after this full pass
+            ValidationEngine.ValidationResult passVal =
+                    ValidationEngine.validateFull(resolvedAll, List.of(), courses, faculty, rooms);
+            System.out.printf("[resolveConflicts] Pass %d complete: %d hard, %d soft%n",
+                    globalPass, passVal.hardCount, passVal.softCount);
+            if (passVal.hardCount == 0) break;
         }
 
         // If we filtered, also keep the entries that were not in scope
@@ -507,7 +551,9 @@ public class TimetableController {
                 String d = entry.get("dept")     != null ? entry.get("dept").toString() : "?";
                 String s = entry.get("semester") != null ? entry.get("semester").toString() : "?";
                 if (!d.equalsIgnoreCase(filterDept) || !s.equals(filterSem)) {
-                    resolvedAll.add(entry);
+                    // Only add if not already in resolvedAll (avoid duplicates)
+                    boolean already = resolvedAll.stream().anyMatch(e -> e == entry);
+                    if (!already) resolvedAll.add(entry);
                 }
             }
         }

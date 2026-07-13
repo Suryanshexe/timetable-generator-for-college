@@ -1,2 +1,8 @@
-Simple Java backend running at http://localhost:8080/api
-Endpoints: /api/courses, /api/faculty, /api/rooms
+[SimpleBackend] Store loaded: courses=10, faculty=6, rooms=4
+[SimpleBackend] Server started at http://localhost:8080/api
+[SimpleBackend] Available collections: /api/courses, /api/faculty, /api/rooms
+[SimpleBackend] Timetable endpoints: /api/timetable, /api/timetable/generate, /api/timetable/validate, /api/timetable/suggest
+[SimpleBackend] AI endpoints: /api/timetable/auto-fix, /api/timetable/chat
+[SimpleBackend] Resolve conflicts: /api/timetable/resolve-conflicts
+[SimpleBackend] Export endpoints: /api/export/csv, /api/export/json
+[SimpleBackend] Analytics: /api/analytics
